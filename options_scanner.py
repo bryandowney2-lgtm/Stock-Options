@@ -206,6 +206,8 @@ def main():
     p.add_argument("--min-dte", type=int, default=7, help="Min days to expiry")
     p.add_argument("--max-dte", type=int, default=45, help="Max days to expiry")
     p.add_argument("--top", type=int, default=10, help="How many to show")
+    p.add_argument("--csv", metavar="PATH", default=None,
+                   help="Also write the top results to this CSV file")
     args = p.parse_args()
 
     print(f"\nScanning {len(args.tickers)} ticker(s) | side={args.side} | "
@@ -241,6 +243,12 @@ def main():
     print(f"TOP {min(args.top, len(out))} CANDIDATES")
     print("=" * 60)
     print(out.to_string(index=False))
+
+    if args.csv:
+        out_to_save = out.copy()
+        out_to_save.insert(0, "scan_utc", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"))
+        out_to_save.to_csv(args.csv, index=False)
+        print(f"\nSaved top {len(out_to_save)} results to {args.csv}")
 
     print("\n" + "-" * 60)
     print("Score blends: leverage, liquidity, unusual volume, IV value, moneyness.")
