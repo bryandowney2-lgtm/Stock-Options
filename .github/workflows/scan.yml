@@ -1,1 +1,42 @@
+name: Options Scan
+
+on:
+  # Run automatically on a schedule (UTC). 13:45 UTC ≈ 9:45 AM ET,
+  # ~15 min after the US market opens. GitHub cron is UTC only and
+  # does not adjust for daylight saving — shift by an hour if needed.
+  schedule:
+    - cron: "45 13 * * 1-5"   # Mon–Fri
+  # Also let you trigger it by hand from the Actions tab.
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run scanner
+        run: |
+          mkdir -p results
+          python options_scanner.py AAPL MSFT NVDA SPY TSLA \
+            --side both --max-dte 45 --top 15 \
+            --csv "results/scan-$(date -u +%Y-%m-%d).csv"
+
+      - name: Commit results back to the repo
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add results/
+          git diff --staged --quiet || git commit -m "Scan results $(date -u +%Y-%m-%d)"
+          git push
 
