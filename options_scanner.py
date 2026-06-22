@@ -53,16 +53,26 @@ def bs_greeks(S, K, T, r, sigma, kind):
 def scan_ticker(symbol, side, min_dte, max_dte, r=0.045):
     tk = yf.Ticker(symbol)
 
-    # current price + recent realized volatility (for IV-vs-RV comparison)
-    hist = tk.history(period="3mo")
-    if hist.empty:
+    # current price + recent realized volatility (for IV-vs-RV comparison).
+    # Wrapped because yfinance can raise (not just return empty) when Yahoo
+    # blocks or rate-limits the request — common on shared CI IPs.
+    try:
+        hist = tk.history(period="3mo")
+    except Exception as e:
+        print(f"  [skip] {symbol}: price fetch failed ({type(e).__name__})")
+        return pd.DataFrame()
+    if hist is None or hist.empty:
         print(f"  [skip] {symbol}: no price history")
         return pd.DataFrame()
     S = float(hist["Close"].iloc[-1])
     log_ret = np.log(hist["Close"] / hist["Close"].shift(1)).dropna()
     realized_vol = float(log_ret.std() * np.sqrt(252)) if len(log_ret) > 5 else np.nan
 
-    expirations = tk.options
+    try:
+        expirations = tk.options
+    except Exception as e:
+        print(f"  [skip] {symbol}: options fetch failed ({type(e).__name__})")
+        return pd.DataFrame()
     if not expirations:
         print(f"  [skip] {symbol}: no options listed")
         return pd.DataFrame()
@@ -92,17 +102,26 @@ def scan_ticker(symbol, side, min_dte, max_dte, r=0.045):
             if df is None or df.empty:
                 continue
             df = df.copy()
+
+            def num(val, default=0.0):
+                """Coerce to float, treating NaN/None/blank as the default."""
+                try:
+                    f = float(val)
+                except (TypeError, ValueError):
+                    return default
+                return default if np.isnan(f) else f
+
             for _, opt in df.iterrows():
-                K = float(opt.get("strike", np.nan))
-                bid = float(opt.get("bid", 0) or 0)
-                ask = float(opt.get("ask", 0) or 0)
-                last = float(opt.get("lastPrice", 0) or 0)
-                vol = float(opt.get("volume", 0) or 0)
-                oi = float(opt.get("openInterest", 0) or 0)
-                iv = float(opt.get("impliedVolatility", 0) or 0)
+                K = num(opt.get("strike"), np.nan)
+                bid = num(opt.get("bid"))
+                ask = num(opt.get("ask"))
+                last = num(opt.get("lastPrice"))
+                vol = num(opt.get("volume"))
+                oi = num(opt.get("openInterest"))
+                iv = num(opt.get("impliedVolatility"))
 
                 mid = (bid + ask) / 2 if (bid > 0 and ask > 0) else last
-                if mid <= 0 or K <= 0:
+                if mid <= 0 or K <= 0 or np.isnan(K) or np.isnan(mid):
                     continue
 
                 # ---- factor 1: leverage (delta * S / premium) ----
@@ -216,23 +235,35 @@ def main():
     frames = []
     for sym in args.tickers:
         print(f"  fetching {sym.upper()} ...")
-        frames.append(scan_ticker(sym.upper(), args.side, args.min_dte, args.max_dte))
+        try:
+            frames.append(scan_ticker(sym.upper(), args.side, args.min_dte, args.max_dte))
+        except Exception as e:
+            print(f"  [skip] {sym.upper()}: unexpected error ({type(e).__name__}: {e})")
+            frames.append(pd.DataFrame())
 
     allopts = pd.concat([f for f in frames if not f.empty], ignore_index=True) \
         if any(not f.empty for f in frames) else pd.DataFrame()
 
+    cols = ["score", "symbol", "type", "expiry", "dte", "strike", "spot",
+            "mid", "delta", "leverage", "iv", "rv", "volume", "open_int",
+            "vol_oi", "spread_pct"]
+
     if allopts.empty:
-        print("\nNo qualifying contracts found. Try widening --max-dte or different tickers.")
+        print("\nNo qualifying contracts found (data source may be unavailable or "
+              "rate-limited). Try widening --max-dte, different tickers, or rerun.")
+        if args.csv:
+            pd.DataFrame(columns=["scan_utc"] + cols).to_csv(args.csv, index=False)
+            print(f"Wrote empty results file to {args.csv}")
         return
 
     ranked = score(allopts)
     if ranked.empty:
         print("\nContracts found but all failed the liquidity floor.")
+        if args.csv:
+            pd.DataFrame(columns=["scan_utc"] + cols).to_csv(args.csv, index=False)
+            print(f"Wrote empty results file to {args.csv}")
         return
 
-    cols = ["score", "symbol", "type", "expiry", "dte", "strike", "spot",
-            "mid", "delta", "leverage", "iv", "rv", "volume", "open_int",
-            "vol_oi", "spread_pct"]
     out = ranked[cols].head(args.top).copy()
     out["score"] = out["score"].round(1)
     out["leverage"] = out["leverage"].round(2)
